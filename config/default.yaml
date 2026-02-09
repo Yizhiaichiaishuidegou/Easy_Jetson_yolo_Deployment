@@ -1,0 +1,112 @@
+# ============================================================================
+# YOLO 高性能推理配置文件 v2.0
+# 针对 Jetson Orin NX 优化
+# ============================================================================
+
+# 模型配置
+model:
+  engine_path: "../model/engine/test.engine"
+  class_names: 
+    - "pedestrian"
+    - "people"
+    - "bicycle"
+    - "car"
+    - "van"
+    - "truck"
+    - "tricycle"
+    - "awning-tricycle"
+    - "bus"
+    - "motor"
+  confidence_threshold: 0.5   # 提高置信度阈值减少误检
+  nms_threshold: 0.45           # NMS阈值
+  input_width: 640
+  input_height: 640
+  num_box: 8400                 # YOLOv8 输出框数量
+
+# 输入源配置
+input:
+  type: "video"                 # video / camera / rtsp / rtmp
+  source: 
+    video_path: "../data/video/vehicle.mp4"
+    image_path: ""
+    camera_id: 0
+    rtsp_url: "rtsp://192.168.31.94:554/stream1"                # RTSP 流地址 (可选)
+    rtmp_url: "rtmp://192.168.31.94:1935/live"            # RTMP 流地址 (可选)
+  video_id: "detection_001"
+  # 解码器配置
+  decoder: "gstreamer_nvdec"             # opencv / gstreamer_nvdec
+                                # opencv: 使用 OpenCV/FFMPEG 解码 (CPU)
+                                # gstreamer_nvdec: 使用 GStreamer + NVDEC 硬件解码
+# 输出配置
+output:
+  save_video: true
+  output_path: "output_v2.mp4"
+  save_detections: false
+  detections_path: "detections.txt"
+  fps_log: true
+  fps_log_path: "fps_data_v2.csv"
+
+# 显示配置
+display:
+  show_fps: true
+  imshow_name: "YOLO Detection V2"
+  window_width: 1280
+  window_height: 720
+  quit_key: "q"
+  show_video: false  # 是否展示视频图像检测结果
+
+# 性能配置 - 针对 Jetson Orin NX 优化
+performance:
+  async_mode: true              # 启用异步流水线 (推荐)
+  queue_size: 3                 # 缓冲区/CUDA流数量
+                                # 3 = 三级流水线 (预处理|推理|后处理 并行)
+                                # 建议值: 2-4, 过大会增加延迟
+  gpu_id: 0
+  max_fps: 60                   # 最大处理帧率
+  cpu_ids: [4, 5, 6, 7] #  this  no work taskset work 
+  # 预处理后端配置
+  preprocess_backend: "cuda"    # cuda / vpi_cuda / vpi_vic
+                                # cuda: 原始 CUDA kernel 预处理
+                                # vpi_cuda: VPI + CUDA 后端 (推荐)
+                                # vpi_vic: VPI + VIC 硬件加速 (需要 NV12 输入)
+  #DLA config
+  use_dla: true
+  dla_core: 0 
+
+# 调试配置
+debug:
+  log_level: "INFO"             # DEBUG / INFO / WARNING / ERROR
+  save_debug_images: false
+  debug_image_path: "./debug_images/"
+  enable_profiling: false       # 启用性能分析输出
+
+# ============================================================================
+# 性能调优说明:
+# 
+# 1. 三级流水线原理:
+#    - Buffer 0: 正在预处理第 N+2 帧
+#    - Buffer 1: 正在推理第 N+1 帧
+#    - Buffer 2: 正在后处理第 N 帧
+#    三个阶段可以在 GPU 上并行执行，最大化 GPU 利用率
+#
+# 2. 零拷贝内存:
+#    利用 Jetson 的统一内存架构，CPU/GPU 共享同一块物理内存
+#    避免了传统的 Host->Device 拷贝开销
+#
+# 3. 建议配置:
+#    - 高吞吐量: queue_size=3, async_mode=true
+#    - 低延迟:   queue_size=1, async_mode=false (使用 SimplePipeline)
+#    - 均衡:     queue_size=2, async_mode=true
+#
+# 4. Jetson Orin NX 特定优化:
+#    - 使用 FP16 精度的 TensorRT 引擎
+#    - 启用 DLA 加速 (如果模型支持)
+#    - 调整 power mode: sudo nvpmodel -m 0 (最高性能)
+#    - 锁定频率: sudo jetson_clocks
+#
+# 5. 硬件加速流水线配置 (最高性能):
+#    decoder: "gstreamer_nvdec"     # NVDEC 硬件解码
+#    preprocess_backend: "vpi_vic"  # VIC 硬件预处理
+#    这将实现完整的硬件加速流水线:
+#    [NVDEC解码] -> NV12 -> [VIC缩放] -> [VIC颜色转换] -> [CUDA归一化] -> [TensorRT推理]
+# ============================================================================
