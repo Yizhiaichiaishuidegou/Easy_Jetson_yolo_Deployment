@@ -140,6 +140,8 @@ private:
     int last_src_h_ = -1;
     float cached_i2d_[6];
     float cached_d2i_[6];
+
+
     
     // TensorRT 组件
     TrtLogger logger_;

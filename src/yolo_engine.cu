@@ -18,86 +18,173 @@ namespace jetson {
 #define GPU_BLOCK_THREADS 256
 #define NUM_BOX_ELEMENT 8
 
-// 预处理核函数: 仿射变换 + 归一化 + 通道转换
+// 预处理核函数: 仿射变换 + 双线性插值 + 完整归一化(mean/std) + BGR<->RGB + NCHW格式
 __global__ void preprocess_kernel(
-    const uint8_t* __restrict__ src,
-    float* __restrict__ dst,
+    const uint8_t* __restrict__ src,  // 输入: HWC格式 BGR 8bit
+    float* __restrict__ dst,          // 输出: NCHW格式 RGB/Float32 (N=1)
     int src_width, int src_height,
     int dst_width, int dst_height,
     float m0, float m1, float m2,  // 仿射矩阵第一行
-    float m3, float m4, float m5,  // 仿射矩阵第二行
-    float scale, uint8_t pad_value, bool swap_rb
+    float m3, float m4, float m5,
+    float scale,  // 仿射矩阵第二行
+    uint8_t pad_value, bool swap_rb
+
 ) {
+    // 线程对应输出图像的(dx, dy)坐标
     int dx = blockIdx.x * blockDim.x + threadIdx.x;
     int dy = blockIdx.y * blockDim.y + threadIdx.y;
     
+    // 边界检查（提前退出，减少无效计算）
     if (dx >= dst_width || dy >= dst_height) return;
     
-    // 计算源图像坐标
+    // 1. 仿射变换：计算对应源图像的坐标
     float src_x = m0 * dx + m1 * dy + m2;
     float src_y = m3 * dx + m4 * dy + m5;
     
-    float c0, c1, c2;
-    
+    // 2. 双线性插值获取BGR像素值（直接计算，无中间变量）
+    float b, g, r;
     if (src_x < 0 || src_x >= src_width || src_y < 0 || src_y >= src_height) {
         // 超出边界，使用填充值
-        c0 = c1 = c2 = pad_value * scale;
+        b = g = r = (float)pad_value;
     } else {
-        // 双线性插值
+        // 双线性插值四邻域坐标
         int x_low = floorf(src_x);
         int y_low = floorf(src_y);
         int x_high = x_low + 1;
         int y_high = y_low + 1;
         
+        // 插值权重
         float lx = src_x - x_low;
         float ly = src_y - y_low;
         float hx = 1.0f - lx;
         float hy = 1.0f - ly;
-        
         float w1 = hy * hx;
         float w2 = hy * lx;
         float w3 = ly * hx;
         float w4 = ly * lx;
         
-        auto get_pixel = [&](int x, int y, int c) -> float {
-            if (x < 0 || x >= src_width || y < 0 || y >= src_height) {
-                return pad_value;
-            }
-            return src[y * src_width * 3 + x * 3 + c];
-        };
-        
-        #define GET_PIXEL(x, y, ch) \
+        // 宏定义简化像素获取（避免重复写边界判断）
+        #define GET_BGR(x, y, ch) \
             (((x) < 0 || (x) >= src_width || (y) < 0 || (y) >= src_height) ? \
              (float)pad_value : (float)src[(y) * src_width * 3 + (x) * 3 + (ch)])
         
-        c0 = w1 * GET_PIXEL(x_low, y_low, 0) + w2 * GET_PIXEL(x_high, y_low, 0) +
-             w3 * GET_PIXEL(x_low, y_high, 0) + w4 * GET_PIXEL(x_high, y_high, 0);
-        c1 = w1 * GET_PIXEL(x_low, y_low, 1) + w2 * GET_PIXEL(x_high, y_low, 1) +
-             w3 * GET_PIXEL(x_low, y_high, 1) + w4 * GET_PIXEL(x_high, y_high, 1);
-        c2 = w1 * GET_PIXEL(x_low, y_low, 2) + w2 * GET_PIXEL(x_high, y_low, 2) +
-             w3 * GET_PIXEL(x_low, y_high, 2) + w4 * GET_PIXEL(x_high, y_high, 2);
+        // 双线性插值计算BGR三个通道
+        b = w1 * GET_BGR(x_low, y_low, 0) + w2 * GET_BGR(x_high, y_low, 0) +
+            w3 * GET_BGR(x_low, y_high, 0) + w4 * GET_BGR(x_high, y_high, 0);
         
-        #undef GET_PIXEL
+        g = w1 * GET_BGR(x_low, y_low, 1) + w2 * GET_BGR(x_high, y_low, 1) +
+            w3 * GET_BGR(x_low, y_high, 1) + w4 * GET_BGR(x_high, y_high, 1);
         
-        // 归一化
-        c0 *= scale;
-        c1 *= scale;
-        c2 *= scale;
+        r = w1 * GET_BGR(x_low, y_low, 2) + w2 * GET_BGR(x_high, y_low, 2) +
+            w3 * GET_BGR(x_low, y_high, 2) + w4 * GET_BGR(x_high, y_high, 2);
+        
+        #undef GET_BGR
     }
     
-    // BGR -> RGB (如果需要)
+    // 3. 整合：归一化 + swap_rb + 写入NCHW（一步完成，无中间变量）
+    int area = dst_width * dst_height;  // C=0/1/2的偏移量
+    int dst_idx = dy * dst_width + dx;  // H*W维度的索引
+    
+    // 按需交换BGR<->RGB（直接计算，无临时变量）
+    float c0, c1, c2;  // 对应输出通道0/1/2
     if (swap_rb) {
-        float t = c0;
-        c0 = c2;
-        c2 = t;
+        // BGR -> RGB：对应第一段的R/G/B顺序
+        c0 = r*scale ;  // 输出通道0: R
+        c1 = g*scale   // 输出通道1: G
+        c2 = b*scale   // 输出通道2: B
+    } else {
+        // 不交换：保持BGR
+        c0 = b *scale;
+        c1 = g *scale;
+        c2 = r *scale;
     }
     
-    // 写入 NCHW 格式
-    int area = dst_width * dst_height;
-    dst[0 * area + dy * dst_width + dx] = c0;
-    dst[1 * area + dy * dst_width + dx] = c1;
-    dst[2 * area + dy * dst_width + dx] = c2;
+    // 写入NCHW格式（N=1，所以省略N维度）
+    dst[0 * area + dst_idx] = c0;  // C=0
+    dst[1 * area + dst_idx] = c1;  // C=1
+    dst[2 * area + dst_idx] = c2;  // C=2
 }
+
+// // 预处理核函数: 仿射变换 + 归一化 + 通道转换
+// __global__ void preprocess_kernel(
+//     const uint8_t* __restrict__ src,
+//     float* __restrict__ dst,
+//     int src_width, int src_height,
+//     int dst_width, int dst_height,
+//     float m0, float m1, float m2,  // 仿射矩阵第一行
+//     float m3, float m4, float m5,  // 仿射矩阵第二行
+//     float scale, uint8_t pad_value, bool swap_rb
+// ) {
+//     int dx = blockIdx.x * blockDim.x + threadIdx.x;
+//     int dy = blockIdx.y * blockDim.y + threadIdx.y;
+    
+//     if (dx >= dst_width || dy >= dst_height) return;
+    
+//     // 计算源图像坐标
+//     float src_x = m0 * dx + m1 * dy + m2;
+//     float src_y = m3 * dx + m4 * dy + m5;
+    
+//     float c0, c1, c2;
+    
+//     if (src_x < 0 || src_x >= src_width || src_y < 0 || src_y >= src_height) {
+//         // 超出边界，使用填充值
+//         c0 = c1 = c2 = pad_value * scale;
+//     } else {
+//         // 双线性插值
+//         int x_low = floorf(src_x);
+//         int y_low = floorf(src_y);
+//         int x_high = x_low + 1;
+//         int y_high = y_low + 1;
+        
+//         float lx = src_x - x_low;
+//         float ly = src_y - y_low;
+//         float hx = 1.0f - lx;
+//         float hy = 1.0f - ly;
+        
+//         float w1 = hy * hx;
+//         float w2 = hy * lx;
+//         float w3 = ly * hx;
+//         float w4 = ly * lx;
+        
+//         auto get_pixel = [&](int x, int y, int c) -> float {
+//             if (x < 0 || x >= src_width || y < 0 || y >= src_height) {
+//                 return pad_value;
+//             }
+//             return src[y * src_width * 3 + x * 3 + c];
+//         };
+        
+//         #define GET_PIXEL(x, y, ch) \
+//             (((x) < 0 || (x) >= src_width || (y) < 0 || (y) >= src_height) ? \
+//              (float)pad_value : (float)src[(y) * src_width * 3 + (x) * 3 + (ch)])
+        
+//         c0 = w1 * GET_PIXEL(x_low, y_low, 0) + w2 * GET_PIXEL(x_high, y_low, 0) +
+//              w3 * GET_PIXEL(x_low, y_high, 0) + w4 * GET_PIXEL(x_high, y_high, 0);
+//         c1 = w1 * GET_PIXEL(x_low, y_low, 1) + w2 * GET_PIXEL(x_high, y_low, 1) +
+//              w3 * GET_PIXEL(x_low, y_high, 1) + w4 * GET_PIXEL(x_high, y_high, 1);
+//         c2 = w1 * GET_PIXEL(x_low, y_low, 2) + w2 * GET_PIXEL(x_high, y_low, 2) +
+//              w3 * GET_PIXEL(x_low, y_high, 2) + w4 * GET_PIXEL(x_high, y_high, 2);
+        
+//         #undef GET_PIXEL
+        
+//         // 归一化
+//         c0 *= scale;
+//         c1 *= scale;
+//         c2 *= scale;
+//     }
+    
+//     // BGR -> RGB (如果需要)
+//     if (swap_rb) {
+//         float t = c0;
+//         c0 = c2;
+//         c2 = t;
+//     }
+    
+//     // 写入 NCHW 格式
+//     int area = dst_width * dst_height;
+//     dst[0 * area + dy * dst_width + dx] = c0;
+//     dst[1 * area + dy * dst_width + dx] = c1;
+//     dst[2 * area + dy * dst_width + dx] = c2;
+// }
 
 // 专门用于 VPI 输出后的归一化和 NCHW 转换 Kernel
 __global__ void vpi_to_nchw_kernel(
@@ -620,6 +707,17 @@ void YoloEngine::preprocessCuda(InferenceBuffer& buffer, const cv::Mat& frame, C
     dim3 block(32, 32);
     dim3 grid((input_w_ + 31) / 32, (input_h_ + 31) / 32);
     
+    // preprocess_kernel<<<grid, block, 0, stream>>>(
+    //     buffer.src_device->get(),
+    //     buffer.input_tensor->get(),
+    //     frame.cols, frame.rows,
+    //     input_w_, input_h_,
+    //     buffer.affine_d2i[0], buffer.affine_d2i[1], buffer.affine_d2i[2],
+    //     buffer.affine_d2i[3], buffer.affine_d2i[4], buffer.affine_d2i[5],
+    //     preprocess_params_.scale,
+    //     preprocess_params_.pad_value,
+    //     preprocess_params_.swap_rb
+    // );
     preprocess_kernel<<<grid, block, 0, stream>>>(
         buffer.src_device->get(),
         buffer.input_tensor->get(),
@@ -631,6 +729,8 @@ void YoloEngine::preprocessCuda(InferenceBuffer& buffer, const cv::Mat& frame, C
         preprocess_params_.pad_value,
         preprocess_params_.swap_rb
     );
+        // 归一化参数（提取为显式参数，更灵活）
+
     
     // 记录预处理完成事件
     buffer.preprocess_done->record(stream);
@@ -905,7 +1005,7 @@ void YoloEngine::drawResults(InferenceBuffer& buffer, const std::vector<std::str
         buffer.detection_count++;
         
         // 绘制边界框
-        cv::Scalar color(0, 255, 0);  // 绿色
+        cv::Scalar color(75, 0, 130);
         cv::rectangle(buffer.result_frame, 
                       cv::Point(static_cast<int>(x1), static_cast<int>(y1)),
                       cv::Point(static_cast<int>(x2), static_cast<int>(y2)),
