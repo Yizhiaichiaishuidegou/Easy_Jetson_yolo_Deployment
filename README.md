@@ -64,23 +64,46 @@ Three stages in parallel on GPU, maximizing GPU utilization.
 - **Jetson Orin NX (16GB)**
 - **TensorRT = 8.5.2**
 - **CUDA = 11.4**
-- **OpenCV = 4.6.0**
-- **Gstreamer = 1.2**
-## pt->onnx->tran_onnx
 ```bash
-cd tools
-python onnx_trans.py yolov8n.onnx
+nvcc -V
+dpkg -l | grep nvinfer
+```
+- **OpenCV = 4.6.0**
+```bash
+pkg-config --modversion opencv4
+```
+- **Gstreamer = 1.2**
+```bash
+gst-launch-1.0 --version
 ```
 
 ### Compilation
 
 ```bash
-cd Yolo_jetson_m && mkdir build
+git clone https://github.com/Yizhiaichiaishuidegou/Easy_Jetson_yolo_Deployment.git
+cd Easy_Jetson_yolo_Deployment && mkdir build
 cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
 ```
+### Data example 
+onnx->trans_onnx
+```bash
+cd tools
+python onnx_trans.py yolov8n.onnx
+```
+onnx -> tensorrt
+```bash
+trtexec --onnx=yolov8_trans.onnx --saveEngine=yolov8_trans.engine --fp16
+```
+Test Data|ONNX |Engine：[Baidu链接(提取码: cwnb)]( https://pan.baidu.com/s/1iOYjUShshpkv2qj8e5KMug?pwd=cwnb  
+)
 
+```bash
+mkdir data && cd data && mkdir video
+cp ../data/video/1.mp4 video/
+mkdir model && cd model && mkdir engine && cp ../model/engine/yolov8n.engine
+```
 ### Running Demo
 
 ```bash
@@ -93,7 +116,18 @@ make -j$(nproc)
 # Enable performance analysis
 ./YoloJetson -p -c ../config/default.yaml
 ```
+##### Jetson Orin NX（16GB）
+```bash
+./YoloJetson -s -c ../config/default.yaml
+```
+<center>
 
+<img src="data\image\test.png" width="600">
+
+</center>
+
+- FPS：40
+- 推理延迟：28ms
 ## Performance Optimization
 
 ### Jetson System Settings
@@ -119,4 +153,4 @@ Jetson Orin NX (15W mode):
 | YOLOv8s-FP16 | 640x640 | ~50 FPS | ~40ms |
 | YOLOv8m-FP16 | 640x640 | ~30 FPS | ~65ms |
 
-*注：Actual performance depends on input video resolution, and number of detected objects.*
+*Tips：Actual performance depends on input video resolution, and number of detected objects.*
