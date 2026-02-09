@@ -94,7 +94,7 @@ python onnx_trans.py yolov8n.onnx
 ```
 onnx -> tensorrt
 ```bash
-trtexec --onnx=yolov8_trans.onnx --saveEngine=yolov8_trans.engine --fp16
+./trtexec --onnx=yolov8_trans.onnx --saveEngine=yolov8_trans.engine --fp16 
 ```
 Test Data|ONNX |Engine：[Baidu链接(提取码: cwnb)]( https://pan.baidu.com/s/1iOYjUShshpkv2qj8e5KMug?pwd=cwnb  
 )
