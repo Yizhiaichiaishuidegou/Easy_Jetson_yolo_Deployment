@@ -26,7 +26,7 @@ jobs:
         run: cd build && make -j$(nproc) 2>&1 | grep -v "warning" || true
       
       - name: Verify build directory exists
-        run: if [ -d "build" ]; then echo "Build directory created successfully."; else echo "Error: Build directory not created."; exit 1; fi
+        run: 'if [ -d "build" ]; then echo "Build directory created successfully."; else echo "Error: Build directory not created."; exit 1; fi'
       
       - name: Complete syntax check
         run: echo "Basic syntax check completed."
