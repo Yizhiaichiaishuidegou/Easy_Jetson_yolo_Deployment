@@ -74,9 +74,9 @@ jobs:
           fi
           
           # Check C++ files
-          C++_FILES=$(find . -name "*.cpp" -o -name "*.h" -o -name "*.cu" | grep -v "build" | grep -v "\.git")
+          CPP_FILES=$(find . -name "*.cpp" -o -name "*.h" -o -name "*.cu" | grep -v "build" | grep -v "\.git")
           
-          if [ -z "$C++_FILES" ]; then
+          if [ -z "$CPP_FILES" ]; then
             echo "No C++ files to check."
             exit 0
           fi
@@ -84,7 +84,7 @@ jobs:
           echo "Checking C++ code format..."
           
           # Check each C++ file
-          for file in $C++_FILES; do
+          for file in $CPP_FILES; do
             # Run clang-format check
             clang-format -i "$file"
             
