@@ -403,6 +403,15 @@ int main(int argc, char** argv) {
         std::cout << "Total frames: " << frame_count << std::endl;
         std::cout << "Average FPS: " << (1000.0 * frame_count / total_time) << std::endl;
         
+        auto stats = pipeline.getStats();
+        std::cout << "========================================" << std::endl;
+        std::cout << "Statistics:" << std::endl;
+        std::cout << "  Avg preprocess: " << stats.avg_preprocess_ms << " ms" << std::endl;
+        std::cout << "  Avg inference: " << stats.avg_inference_ms << " ms" << std::endl;
+        std::cout << "  Avg postprocess: " << stats.avg_postprocess_ms << " ms" << std::endl;
+        std::cout << "  Avg total: " << stats.avg_total_ms << " ms" << std::endl;
+        std::cout << "========================================" << std::endl;
+        
     } else {
         // 高性能异步流水线
         std::cout << "Using High-Performance Async Pipeline" << std::endl;
@@ -569,6 +578,7 @@ int main(int argc, char** argv) {
         std::cout << "  Avg preprocess: " << stats.avg_preprocess_ms << " ms" << std::endl;
         std::cout << "  Avg inference: " << stats.avg_inference_ms << " ms" << std::endl;
         std::cout << "  Avg postprocess: " << stats.avg_postprocess_ms << " ms" << std::endl;
+        std::cout << "  Avg wait: " << stats.avg_wait_ms << " ms" << std::endl;
         std::cout << "  Avg total: " << stats.avg_total_ms << " ms" << std::endl;
         std::cout << "========================================" << std::endl;
     }

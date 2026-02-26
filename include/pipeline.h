@@ -115,6 +115,7 @@ public:
         double avg_preprocess_ms = 0;
         double avg_inference_ms = 0;
         double avg_postprocess_ms = 0;
+        double avg_wait_ms = 0;
         double avg_total_ms = 0;
         uint64_t total_frames = 0;
     };
@@ -170,17 +171,27 @@ private:
     // 统计
     std::atomic<double> current_fps_{0};
     std::atomic<uint64_t> frame_counter_{0};
-    std::atomic<uint64_t> processed_counter_{0}; // 新增：已处理帧计数
+    std::atomic<uint64_t> processed_counter_{0}; // 已处理帧计数
     
-    // 性能统计 (移动平均)
+    // 性能统计 (滑动窗口)
+    static constexpr size_t WINDOW_SIZE = 30; // 滑动窗口大小
+    std::vector<double> preprocess_times_;     // 预处理时间窗口
+    std::vector<double> inference_times_;      // 推理时间窗口
+    std::vector<double> postprocess_times_;    // 后处理时间窗口
+    std::vector<double> wait_times_;           // 等待时间窗口
+    std::vector<double> total_times_;          // 总处理时间窗口
+    std::mutex stats_mutex_;                   // 统计数据锁
+    
+    // 滑动窗口统计结果
     std::atomic<double> avg_preprocess_ms_{0};
     std::atomic<double> avg_inference_ms_{0};
     std::atomic<double> avg_postprocess_ms_{0};
+    std::atomic<double> avg_wait_ms_{0};
     std::atomic<double> avg_total_ms_{0};
     
-    // FPS计算
+    // FPS计算 (滑动窗口)
+    std::vector<std::chrono::high_resolution_clock::time_point> frame_times_; // 帧时间戳窗口
     std::chrono::high_resolution_clock::time_point last_fps_time_;
-    uint64_t last_fps_frame_count_ = 0;
 };
 
 /**
@@ -201,6 +212,18 @@ public:
     bool process(const cv::Mat& frame, FrameResult& result);
     
     double getLastProcessingTime() const { return last_processing_time_; }
+    
+    // 获取性能统计
+    struct Stats {
+        double avg_preprocess_ms = 0;
+        double avg_inference_ms = 0;
+        double avg_postprocess_ms = 0;
+        double avg_total_ms = 0;
+    };
+    Stats getStats() const;
+    
+    // 获取当前FPS
+    double getFPS() const { return current_fps_; }
 
 private:
     ModelConfig model_config_;
@@ -213,6 +236,22 @@ private:
     
     double last_processing_time_ = 0;
     bool initialized_ = false;
+    
+    // 性能统计 (滑动窗口)
+    static constexpr size_t WINDOW_SIZE = 10; // 滑动窗口大小
+    std::vector<double> preprocess_times_;     // 预处理时间窗口
+    std::vector<double> inference_times_;      // 推理时间窗口
+    std::vector<double> postprocess_times_;    // 后处理时间窗口
+    std::vector<double> total_times_;          // 总处理时间窗口
+    std::vector<std::chrono::high_resolution_clock::time_point> frame_times_; // 帧时间戳窗口
+    std::mutex stats_mutex_;                   // 统计数据锁
+    
+    // 滑动窗口统计结果
+    double avg_preprocess_ms_ = 0;
+    double avg_inference_ms_ = 0;
+    double avg_postprocess_ms_ = 0;
+    double avg_total_ms_ = 0;
+    double current_fps_ = 0;
 };
 
 } // namespace jetson

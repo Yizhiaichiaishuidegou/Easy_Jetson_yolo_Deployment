@@ -1,0 +1,153 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  code-style:
+    name: Code Style Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+      
+      - name: Check code format
+        run: |
+          # Create .clang-format if not exists
+          if [ ! -f ".clang-format" ]; then
+            cat > .clang-format << EOF
+          BasedOnStyle: Google
+          IndentWidth: 4
+          TabWidth: 4
+          UseTab: Never
+          AllowShortBlocksOnASingleLine: false
+          AllowShortCaseLabelsOnASingleLine: false
+          AllowShortFunctionsOnASingleLine: None
+          AllowShortIfStatementsOnASingleLine: false
+          AllowShortLoopsOnASingleLine: false
+          AlwaysBreakAfterReturnType: None
+          AlwaysBreakTemplateDeclarations: true
+          BinPackArguments: true
+          BinPackParameters: true
+          BreakBeforeBraces: Allman
+          BreakBeforeTernaryOperators: true
+          BreakConstructorInitializersBeforeComma: false
+          ColumnLimit: 80
+          ConstructorInitializerAllOnOneLineOrOnePerLine: false
+          ConstructorInitializerIndentWidth: 4
+          ContinuationIndentWidth: 4
+          Cpp11BracedListStyle: true
+          DerivePointerAlignment: false
+          IndentCaseLabels: true
+          IndentPPDirectives: None
+          IndentWidth: 4
+          KeepEmptyLinesAtTheStartOfBlocks: false
+          MaxEmptyLinesToKeep: 1
+          NamespaceIndentation: None
+          PointerAlignment: Left
+          ReflowComments: true
+          SortIncludes: true
+          SortUsingDeclarations: true
+          SpaceAfterCStyleCast: false
+          SpaceAfterTemplateKeyword: true
+          SpaceBeforeAssignmentOperators: true
+          SpaceBeforeCpp11BracedList: false
+          SpaceBeforeCtorInitializerColon: true
+          SpaceBeforeInheritanceColon: true
+          SpaceBeforeParens: ControlStatements
+          SpaceInEmptyParentheses: false
+          SpacesBeforeTrailingComments: 2
+          SpacesInAngles: false
+          SpacesInCStyleCastParentheses: false
+          SpacesInContainerLiterals: true
+          SpacesInParentheses: false
+          SpacesInSquareBrackets: false
+          Standard: Cpp11
+          TabWidth: 4
+          UseTab: Never
+          EOF
+          fi
+          
+          # Check C++ files
+          C++_FILES=$(find . -name "*.cpp" -o -name "*.h" -o -name "*.cu" | grep -v "build" | grep -v "\.git")
+          
+          if [ -z "$C++_FILES" ]; then
+            echo "No C++ files to check."
+            exit 0
+          fi
+          
+          echo "Checking C++ code format..."
+          
+          # Check each C++ file
+          for file in $C++_FILES; do
+            # Run clang-format check
+            clang-format -i "$file"
+            
+            # Check if there are changes
+            if git diff "$file" | grep -q "^+" || git diff "$file" | grep -q "^-"; then
+              echo "Error: File $file has formatting issues."
+              git diff "$file"
+              exit 1
+            fi
+          done
+          
+          echo "Code format check passed."
+
+  build:
+    name: Build Project
+    runs-on: ubuntu-latest
+    needs: code-style
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libopencv-dev
+      
+      - name: Create build directory
+        run: mkdir -p build
+      
+      - name: Configure CMake
+        run: cd build && cmake ..
+      
+      - name: Build project
+        run: cd build && make -j$(nproc)
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-artifacts
+          path: build/
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: build-artifacts
+          path: build/
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopencv-dev
+      
+      - name: Run tests
+        run: |
+          # Check if test executable exists
+          if [ -f "build/test" ]; then
+            cd build && ./test
+          else
+            echo "No test executable found. Skipping tests."
+          fi

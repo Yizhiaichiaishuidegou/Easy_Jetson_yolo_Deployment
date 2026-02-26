@@ -34,6 +34,14 @@ Pipeline::Pipeline(const ModelConfig& model_config, const PipelineConfig& pipeli
     , pipeline_config_(pipeline_config)
 {
     last_fps_time_ = std::chrono::high_resolution_clock::now();
+    
+    // 初始化滑动窗口
+    preprocess_times_.reserve(WINDOW_SIZE);
+    inference_times_.reserve(WINDOW_SIZE);
+    postprocess_times_.reserve(WINDOW_SIZE);
+    wait_times_.reserve(WINDOW_SIZE);
+    total_times_.reserve(WINDOW_SIZE);
+    frame_times_.reserve(WINDOW_SIZE);
 }
 
 Pipeline::~Pipeline() {
@@ -181,6 +189,7 @@ Pipeline::Stats Pipeline::getStats() const {
     stats.avg_preprocess_ms = avg_preprocess_ms_.load();
     stats.avg_inference_ms = avg_inference_ms_.load();
     stats.avg_postprocess_ms = avg_postprocess_ms_.load();
+    stats.avg_wait_ms = avg_wait_ms_.load();
     stats.avg_total_ms = avg_total_ms_.load();
     stats.total_frames = frame_counter_.load();
     return stats;
@@ -308,23 +317,61 @@ void Pipeline::processingWorker() {
             result.processing_time_ms = buffer->timestamp_postprocess_end - buffer->timestamp_push;
             result.valid = true;
             processed_counter_++;
-            // 更新统计
+            // 计算各阶段时间
             double preprocess_time = buffer->timestamp_inference_start - buffer->timestamp_preprocess_start;
             double inference_time = buffer->timestamp_postprocess_start - buffer->timestamp_inference_start;
             double postprocess_time = buffer->timestamp_postprocess_end - buffer->timestamp_postprocess_start;
+            double wait_time = buffer->timestamp_preprocess_start - buffer->timestamp_push;
+            double total_time = result.processing_time_ms;
             
-            avg_preprocess_ms_ = 0.9 * avg_preprocess_ms_ + 0.1 * preprocess_time;
-            avg_inference_ms_ = 0.9 * avg_inference_ms_ + 0.1 * inference_time;
-            avg_postprocess_ms_ = 0.9 * avg_postprocess_ms_ + 0.1 * postprocess_time;
-            avg_total_ms_ = 0.9 * avg_total_ms_ + 0.1 * result.processing_time_ms;
-            
-            // 更新FPS (使用 processed_counter_)
-            auto now = std::chrono::high_resolution_clock::now();
-            auto elapsed = std::chrono::duration<double>(now - last_fps_time_).count();
-            if (elapsed >= 1.0) {
-                current_fps_ = (processed_counter_ - last_fps_frame_count_) / elapsed;
-                last_fps_time_ = now;
-                last_fps_frame_count_ = processed_counter_.load();
+            // 更新滑动窗口统计
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                
+                // 更新时间窗口
+                preprocess_times_.push_back(preprocess_time);
+                inference_times_.push_back(inference_time);
+                postprocess_times_.push_back(postprocess_time);
+                wait_times_.push_back(wait_time);
+                total_times_.push_back(total_time);
+                
+                // 保持窗口大小
+                if (preprocess_times_.size() > WINDOW_SIZE) {
+                    preprocess_times_.erase(preprocess_times_.begin());
+                    inference_times_.erase(inference_times_.begin());
+                    postprocess_times_.erase(postprocess_times_.begin());
+                    wait_times_.erase(wait_times_.begin());
+                    total_times_.erase(total_times_.begin());
+                }
+                
+                // 更新帧时间窗口
+                frame_times_.push_back(std::chrono::high_resolution_clock::now());
+                if (frame_times_.size() > WINDOW_SIZE) {
+                    frame_times_.erase(frame_times_.begin());
+                }
+                
+                // 计算滑动窗口平均值
+                auto calculateAverage = [](const std::vector<double>& times) {
+                    if (times.empty()) return 0.0;
+                    double sum = 0.0;
+                    for (double time : times) sum += time;
+                    return sum / times.size();
+                };
+                
+                avg_preprocess_ms_ = calculateAverage(preprocess_times_);
+                avg_inference_ms_ = calculateAverage(inference_times_);
+                avg_postprocess_ms_ = calculateAverage(postprocess_times_);
+                avg_wait_ms_ = calculateAverage(wait_times_);
+                avg_total_ms_ = calculateAverage(total_times_);
+                
+                // 使用滑动窗口计算FPS
+                if (frame_times_.size() >= 2) {
+                    double window_duration = std::chrono::duration<double>(
+                        frame_times_.back() - frame_times_.front()).count();
+                    if (window_duration > 0) {
+                        current_fps_ = (frame_times_.size() - 1) / window_duration;
+                    }
+                }
             }
             
             // 释放缓冲区
@@ -360,15 +407,16 @@ void Pipeline::outputWorker() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         
         if (pipeline_config_.enable_profiling) {
-            auto stats = getStats();
-            std::cout << "Pipeline Stats - "
-                      << "FPS: " << current_fps_.load() 
-                      << " Prep: " << stats.avg_preprocess_ms << "ms"
-                      << " Infer: " << stats.avg_inference_ms << "ms"
-                      << " Post: " << stats.avg_postprocess_ms << "ms"
-                      << " Total: " << stats.avg_total_ms << "ms"
-                      << std::endl;
-        }
+                auto stats = getStats();
+                std::cout << "Pipeline Stats - "
+                          << "FPS: " << current_fps_.load() 
+                          << " Prep: " << stats.avg_preprocess_ms << "ms"
+                          << " Infer: " << stats.avg_inference_ms << "ms"
+                          << " Post: " << stats.avg_postprocess_ms << "ms"
+                          << " Wait: " << stats.avg_wait_ms << "ms"
+                          << " Total: " << stats.avg_total_ms << "ms"
+                          << std::endl;
+            }
     }
     
     std::cout << "Output worker stopped" << std::endl;
@@ -383,6 +431,12 @@ SimplePipeline::SimplePipeline(const ModelConfig& model_config, PreprocessBacken
     : model_config_(model_config), preprocess_backend_(backend), 
       use_dla_(use_dla), dla_core_(dla_core)
 {
+    // 初始化滑动窗口
+    preprocess_times_.reserve(WINDOW_SIZE);
+    inference_times_.reserve(WINDOW_SIZE);
+    postprocess_times_.reserve(WINDOW_SIZE);
+    total_times_.reserve(WINDOW_SIZE);
+    frame_times_.reserve(WINDOW_SIZE);
 }
 
 SimplePipeline::~SimplePipeline() {
@@ -450,24 +504,83 @@ bool SimplePipeline::process(const cv::Mat& frame, FrameResult& result) {
     buffer_->state = BufferState::PREPROCESSING;
     
     // 预处理
+    auto preprocess_start = std::chrono::high_resolution_clock::now();
     engine_->preprocess(*buffer_, frame, *stream_);
+    auto preprocess_end = std::chrono::high_resolution_clock::now();
     
     // 推理
     buffer_->state = BufferState::INFERRING;
+    auto inference_start = std::chrono::high_resolution_clock::now();
     engine_->inference(*buffer_, *stream_);
+    auto inference_end = std::chrono::high_resolution_clock::now();
     
     // 后处理
     buffer_->state = BufferState::POSTPROCESSING;
+    auto postprocess_start = std::chrono::high_resolution_clock::now();
     engine_->postprocess(*buffer_, *stream_);
     
     // 同步
     stream_->synchronize();
+    auto postprocess_end = std::chrono::high_resolution_clock::now();
     
     // 绘制结果
     engine_->drawResults(*buffer_, model_config_.class_names);
     
     auto end = std::chrono::high_resolution_clock::now();
     last_processing_time_ = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    // 计算各阶段时间
+    double preprocess_time = std::chrono::duration<double, std::milli>(preprocess_end - preprocess_start).count();
+    double inference_time = std::chrono::duration<double, std::milli>(inference_end - inference_start).count();
+    double postprocess_time = std::chrono::duration<double, std::milli>(postprocess_end - postprocess_start).count();
+    double total_time = last_processing_time_;
+    
+    // 更新滑动窗口统计
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        
+        // 更新时间窗口
+        preprocess_times_.push_back(preprocess_time);
+        inference_times_.push_back(inference_time);
+        postprocess_times_.push_back(postprocess_time);
+        total_times_.push_back(total_time);
+        
+        // 保持窗口大小
+        if (preprocess_times_.size() > WINDOW_SIZE) {
+            preprocess_times_.erase(preprocess_times_.begin());
+            inference_times_.erase(inference_times_.begin());
+            postprocess_times_.erase(postprocess_times_.begin());
+            total_times_.erase(total_times_.begin());
+        }
+        
+        // 更新帧时间窗口
+        frame_times_.push_back(end);
+        if (frame_times_.size() > WINDOW_SIZE) {
+            frame_times_.erase(frame_times_.begin());
+        }
+        
+        // 计算滑动窗口平均值
+        auto calculateAverage = [](const std::vector<double>& times) {
+            if (times.empty()) return 0.0;
+            double sum = 0.0;
+            for (double time : times) sum += time;
+            return sum / times.size();
+        };
+        
+        avg_preprocess_ms_ = calculateAverage(preprocess_times_);
+        avg_inference_ms_ = calculateAverage(inference_times_);
+        avg_postprocess_ms_ = calculateAverage(postprocess_times_);
+        avg_total_ms_ = calculateAverage(total_times_);
+        
+        // 使用滑动窗口计算FPS
+        if (frame_times_.size() >= 2) {
+            double window_duration = std::chrono::duration<double>(
+                frame_times_.back() - frame_times_.front()).count();
+            if (window_duration > 0) {
+                current_fps_ = (frame_times_.size() - 1) / window_duration;
+            }
+        }
+    }
     
     // 填充结果
     result.frame_id = buffer_->frame_id;
@@ -478,6 +591,15 @@ bool SimplePipeline::process(const cv::Mat& frame, FrameResult& result) {
     result.valid = true;
     
     return true;
+}
+
+SimplePipeline::Stats SimplePipeline::getStats() const {
+    Stats stats;
+    stats.avg_preprocess_ms = avg_preprocess_ms_;
+    stats.avg_inference_ms = avg_inference_ms_;
+    stats.avg_postprocess_ms = avg_postprocess_ms_;
+    stats.avg_total_ms = avg_total_ms_;
+    return stats;
 }
 
 } // namespace jetson
